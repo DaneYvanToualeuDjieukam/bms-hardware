@@ -57,7 +57,7 @@ bool writeEEPROM(uint8_t reg, uint8_t value)
   Wire.beginTransmission(0x00);
   Wire.write(base);
   Wire.endTransmission(false);
-  Wire.requestFrom(0x28, 4);
+  Wire.requestFrom(0x00, 4);
   
   for (byte i = 0; i < 4; i++) {
     while (!Wire.available());
@@ -115,7 +115,7 @@ bool writeEEPROMWord(uint8_t reg, uint16_t value)
   Wire.beginTransmission(0x00);
   Wire.write(base);
   Wire.endTransmission(false);
-  Wire.requestFrom(0x28, 4);
+  Wire.requestFrom(0x00, 4);
   
   for (byte i = 0; i < 4; i++) {
     while (!Wire.available());
@@ -160,7 +160,7 @@ uint8_t readReg(uint8_t reg)
   Wire.beginTransmission(0x00);
   Wire.write(reg);              //target a specific register
   Wire.endTransmission(false);  //If false, endTransmission() sends a restart message after transmission 
-  Wire.requestFrom(0x28, 1);    //If true, requestFrom() sends a stop message after the request, releasing the I2C bus
+  Wire.requestFrom(0x00, 1);    //If true, requestFrom() sends a stop message after the request, releasing the I2C bus
   //while (!Wire.available());
   byte slaveByte2 = Wire.read();
   //Wire.endTransmission();
@@ -178,7 +178,7 @@ uint16_t readPackV()
   float reading = (uint16_t)(r2 << 8 | r1);
 
   reading *= (1.8 * 32.0);
-  reading /= (4095);
+  reading /= (4095.0);
 
   return reading;
 }
@@ -302,7 +302,7 @@ uint16_t readRegVScale(uint8_t reg)
   float reading = (uint16_t)(r2 << 8 | r1);
 
   reading *= (1.8 * 8.0);
-  reading /= (4095 * 3.0);
+  reading /= (4095.0 * 3.0);
 
   return reading;
 }
@@ -568,7 +568,7 @@ boolean writeEEPROMVoltage(uint8_t add_, uint16_t mV, uint8_t headerFourBits)
 
   // datasheet voltage conversion
   reading *= (1.8 * 8.0);
-  reading /= (4095 * 3.0);
+  reading /= (4095.0 * 3.0);
   
   Serial.print("Setting Voltage To : " + String(reading) + " mV");
 
@@ -779,6 +779,41 @@ uint16_t minCellV()
   return readRegVScale(0x8A);
 }
 
+/*
+ * UserEEPROM
+ * Interactions with the eeprom for user use.
+ * 
+ */
+uint8_t readUserEEPROM(uint8_t address)
+{
+  volatile byte r, r2;
+  do {
+    r = readReg(0x50 + (address & 0x0F));
+    delay(1);
+    r2 = readReg(0x50 + (address & 0x0F));
+
+  } while (r != r2);
+  return r;
+}
+
+
+/*
+ * Print the configuration register used in islSetUp
+ */
+void printUserEEPROM(){
+  //Read EEPROM
+  Serial.println(F("Reading User EEPROM"));
+  enableEEPROMAccess();
+  delay(1);
+  
+  for (uint8_t i = 0; i < 4; i++){
+    Serial.println(readUserEEPROM(i), HEX);
+    delay(1);
+  }
+  
+  disableEEPROMAccess();
+}
+
 
 /*
  * ISL Set up
@@ -835,7 +870,7 @@ void loop()
   Serial.println(maxCellV());
   
   //printStatus();
-
+  
   delay(5000);
 }
 
@@ -853,10 +888,10 @@ void setup()
   //False comms to unlock I2c state machine on the ic if we mess up^
   disableEEPROMAccess();
 
-  writeReg(0x85, 0b00010000);//Set current shunt gain
+  writeReg(0x85, 0b00010000);//Set current shunt gain - x50
 
   islSetUp(); //set ISL set control
 
   //printStatus();  // after the isl is set up, on can define to read all registers
-
+  //printUserEEPROM();
 }
