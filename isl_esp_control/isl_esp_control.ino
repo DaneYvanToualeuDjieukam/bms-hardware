@@ -14,6 +14,161 @@ bool continiousReadings = false;
 
 
 /*
+ * Do not write to addresses 58H through 7FH or locations higher than address ABH, because these addresses
+ * access registers that are reserved. Writing to these locations can result in unexpected device operation
+*/
+void writeReg(uint8_t reg, uint8_t value)
+{
+  if ((reg > 0x58 && reg < 0x7F) || reg > 0xAB)
+    return;
+    
+  Wire.beginTransmission(0x00); 
+  Wire.write(reg);              // first write the register to access
+  Wire.write(value);            // then write the value to pass
+  Wire.endTransmission();       // send the data
+}
+
+
+/*
+ * The EEPROM Enable bit determines read/write access to either the control registers or the EEPROM.
+ * Set EEEN = 0 (default) by writing 0x00 to register 0x89 to access the control registers.
+ * Set EEEN = 1 by writing 0x01 to register 0x89 to access the ISL94202 EEPROM
+*/
+void disableEEPROMAccess()
+{
+  //Set the bit to change to read/write EEPROM
+  writeReg(0x89, 0x00);
+  delay(5);
+}
+
+
+bool writeEEPROM(uint8_t reg, uint8_t value)
+{
+  if ((reg > 0x58 && reg < 0x7F) || reg > 0xAB)
+    return false;
+    
+  enableEEPROMAccess();
+  
+  //^These are reserved areas for factory cal etc
+  uint8_t buffer[4];//We need to write in pages
+  uint8_t base = reg & 0xFC;
+  buffer[0] = readReg(base);
+  delay(1);//delay to allow EEPROM refresh
+  Wire.beginTransmission(0x00);
+  Wire.write(base);
+  Wire.endTransmission(false);
+  Wire.requestFrom(0x28, 4);
+  
+  for (byte i = 0; i < 4; i++) {
+    while (!Wire.available());
+    buffer[i] = Wire.read();
+  }
+  
+  Wire.endTransmission();
+  //We have read in the buffer
+  //Update the buffer
+  buffer[reg & 0x03] = value;
+
+  Wire.beginTransmission(0x00);
+  Wire.write(base );
+  Wire.write(buffer[0]);
+  Wire.endTransmission();
+  delay(50);//pause for EEPROM write
+
+  //^Special case for first byte causing EEPROM reload
+  for (uint8_t i = 0; i < 4; i++)
+  {
+    Wire.beginTransmission(0x00);
+    Wire.write(base + i);
+    Wire.write(buffer[i]);
+    Wire.endTransmission();
+    delay(35);//pause for EEPROM write
+  }
+  delay(50);
+  disableEEPROMAccess();
+  
+  return value == readReg(reg);
+  //return true if the value was changed sucsessfully
+}
+
+
+/*
+ * Write the proper word to EEPROM
+ * set the reserved words address
+ * read the values of the buffer to be transmitted
+ * transmit the buffer's first byte once (eeprom first byte reload)
+ * transmit the full buffer data for full eeprom reload
+*/
+bool writeEEPROMWord(uint8_t reg, uint16_t value)
+{
+  // Do not write to addresses 58H through 7FH or locations higher than address ABH
+  if ((reg > 0x58 && reg < 0x7F) || reg > 0xAB)
+    return false;
+
+  enableEEPROMAccess();
+
+  // These are reserved areas for factory cal etc
+  uint8_t buffer[4];//We need to write in pages
+  uint8_t base = reg & 0xFC;
+  buffer[0] = readReg(base);
+  delay(1);//delay to allow EEPROM refresh
+  Wire.beginTransmission(0x00);
+  Wire.write(base);
+  Wire.endTransmission(false);
+  Wire.requestFrom(0x28, 4);
+  
+  for (byte i = 0; i < 4; i++) {
+    while (!Wire.available());
+    buffer[i] = Wire.read();
+  }
+  
+  Wire.endTransmission(); //We have read in the buffer
+  
+  //Update the buffer
+  buffer[reg & 0x03] = value & 0xFF;
+  buffer[(reg & 0x03) + 1] = value >> 8;    // shift to the write
+
+  Wire.beginTransmission(0x00);
+  Wire.write(base);
+  Wire.write(buffer[0]);
+  Wire.endTransmission();
+  delay(60);//pause for EEPROM write - at least 20ms
+
+  //Special case for first byte causing EEPROM reload
+  for (uint8_t i = 0; i < 4; i++)
+  {
+    Wire.beginTransmission(0x00);
+    Wire.write(base + i);
+    Wire.write(buffer[i]);
+    Wire.endTransmission();
+    delay(35);//pause for EEPROM write
+  }
+  delay(50);
+
+  disableEEPROMAccess();
+  
+  //return true if the value was changed sucsessfully
+  return value == readReg(reg);
+}
+
+
+/*
+ * 
+ */
+uint8_t readReg(uint8_t reg)
+{
+  Wire.beginTransmission(0x00);
+  Wire.write(reg);              //target a specific register
+  Wire.endTransmission(false);  //If false, endTransmission() sends a restart message after transmission 
+  Wire.requestFrom(0x28, 1);    //If true, requestFrom() sends a stop message after the request, releasing the I2C bus
+  //while (!Wire.available());
+  byte slaveByte2 = Wire.read();
+  //Wire.endTransmission();
+  return slaveByte2;
+}
+
+
+/*
  * return pack voltage
  */
 uint16_t readPackV()
@@ -22,8 +177,8 @@ uint16_t readPackV()
   uint16_t r2 = readReg(0xA6 + 1);
   float reading = (uint16_t)(r2 << 8 | r1);
 
-  reading *= (1.8 * 32);
-  reading /= (4.095 );
+  reading *= (1.8 * 32.0);
+  reading /= (4095);
 
   return reading;
 }
@@ -47,7 +202,7 @@ uint16_t readCurrent()
   uint8_t r1 = readReg(0x8F);
   float reading = (((uint16_t)(r2 << 8 | r1)) & 0xFFFF);
   reading *= (1.8);
-  reading /= (4095 * 2.89);
+  reading /= (4095.0 * 5.0 * 0.00308);
   return reading;
 }
 
@@ -133,6 +288,7 @@ void printStatus()
       Serial.print("Balancing Cell : ");
       Serial.print(String(i + 1) + "  ");
     }
+    Serial.println();
 }
 
 
@@ -145,8 +301,8 @@ uint16_t readRegVScale(uint8_t reg)
   uint16_t r2 = (readReg(reg + 1)) & 0x0F;
   float reading = (uint16_t)(r2 << 8 | r1);
 
-  reading *= (1.8 * 8);
-  reading /= (4.095 * 3);
+  reading *= (1.8 * 8.0);
+  reading /= (4095 * 3.0);
 
   return reading;
 }
@@ -196,8 +352,12 @@ void setDischargeShortCircuit(uint8_t threshold, uint16_t count, uint8_t timeSca
     return;
   }
   
-  if(!writeEEPROMTimeout(0x1A, count, timeScale, thres))
+  if(!writeEEPROMTimeout(0x1A, count, timeScale, thres)){
     Serial.println(" -- DSC NOT SET");
+  }
+  else{
+    Serial.println("DSC DONE");
+  }
 }
 
 
@@ -245,8 +405,12 @@ void setChargeOverCurrent(uint8_t threshold, uint16_t count, uint8_t timeScale)
     return;
   }
   
-  if(!writeEEPROMTimeout(0x18, count, timeScale, thres))
+  if(!writeEEPROMTimeout(0x18, count, timeScale, thres)){
     Serial.println(" -- COC NOT SET");
+  }
+  else{
+    Serial.println("COC DONE");
+  }
 }
 
 /*
@@ -294,8 +458,12 @@ void setDischargeOverCurrent(uint8_t threshold, uint16_t count, uint8_t timeScal
     return;
   }
   
-  if(!writeEEPROMTimeout(0x16, count, timeScale, thres))
+  if(!writeEEPROMTimeout(0x16, count, timeScale, thres)){
     Serial.println(" -- DOC NOT SET");
+  }
+  else{
+    Serial.println("DOC DONE");
+  }
 }
 
 
@@ -316,10 +484,10 @@ void setFeature2(bool CellBalanceDuringDischarge, bool CellbalanceDuringCharge,
   output |= enableBalanceAtEOC ? 1 : 0;
 
   if(!writeEEPROM(0x4B, output)){
-    Serial.print(" -- FET CONTROL1 NOT SET");
+    Serial.println(" -- FET CONTROL 2 NOT SET");
   }
   else{
-    Serial.print("Feature 2 ");
+    Serial.print("Feature 2: ");
     Serial.println(readReg(0x4B & 0xFC), HEX);
   }
 }
@@ -340,23 +508,13 @@ void setFeature1(bool CellFActivatesPSD, bool XT2Mode, bool TGain, bool PreCharg
   output |= OpenWireSetsPSD;
   
   if(!writeEEPROM(0x4A, output)){
-    Serial.print(" -- FET CONTROL1 NOT SET");
+    Serial.println(" -- FET CONTROL 1 NOT SET");
   }
   else{
     Serial.print("Feature 1 ");
     Serial.println(readReg(0x4A & 0xFC), HEX);
   }
   
-}
-
-
-/*
- * disable eeprom register access with 00
- */
-void disableEEPROMAccess()
-{
-  //Set the bit to change to read/write EEPROM
-  writeReg(0x89, 0x00);
 }
 
 
@@ -368,67 +526,19 @@ void enableEEPROMAccess()
 {
   //Set the bit to change to read/write EEPROM
   writeReg(0x89, 0x01);
+  delay(5);
 }
+
 
 /*
- * Write the proper word to EEPROM
- * set the reserved words address
- * read the values of the buffer to be transmitted
- * transmit the buffer's first byte once (eeprom first byte reload)
- * transmit the full buffer data for full eeprom reload
-*/
-bool writeEEPROMWord(uint8_t reg, uint16_t value)
+ * Write the eeprom mv to scale
+ */
+uint16_t milliVoltsToVScaleRaw(uint16_t mV)
 {
-  // Do not write to addresses 58H through 7FH or locations higher than address ABH
-  if ((reg > 0x58 && reg < 0x7F) || reg > 0xAB)
-    return false;
-
-  enableEEPROMAccess();
-
-  // These are reserved areas for factory cal etc
-  uint8_t buffer[4];//We need to write in pages
-  uint8_t base = reg & 0xFC;
-  buffer[0] = readReg(base);
-  delay(1);//delay to allow EEPROM refresh
-  Wire.beginTransmission(0x28);
-  Wire.write(base);
-  Wire.endTransmission(false);
-  Wire.requestFrom(0x28, 4);
-  
-  for (byte i = 0; i < 4; i++) {
-    while (!Wire.available());
-    buffer[i] = Wire.read();
-  }
-  
-  Wire.endTransmission(); //We have read in the buffer
-  
-  //Update the buffer
-  buffer[reg & 0x03] = value & 0xFF;
-  buffer[(reg & 0x03) + 1] = value >> 8;    // shift to the write
-
-  Wire.beginTransmission(0x28);
-  Wire.write(base);
-  Wire.write(buffer[0]);
-  Wire.endTransmission();
-  delay(60);//pause for EEPROM write - at least 20ms
-
-  //Special case for first byte causing EEPROM reload
-  for (uint8_t i = 0; i < 4; i++)
-  {
-    Wire.beginTransmission(0x28);
-    Wire.write(base + i);
-    Wire.write(buffer[i]);
-    Wire.endTransmission();
-    delay(35);//pause for EEPROM write
-  }
-  delay(50);
-
-  disableEEPROMAccess();
-  
-  //return true if the value was changed sucsessfully
-  return value == readReg(reg);
+  //float retvalue =((float)mV)*((4095*3)/(1.8*8));
+  float retvalue = (((float)mV) / 1000.0) * 853.125;
+  return retvalue;
 }
-
 
 /*
  * determine if 12 bits header was provided, if not exit
@@ -436,7 +546,7 @@ bool writeEEPROMWord(uint8_t reg, uint16_t value)
  * get the voltage conversion out of the bit for confirmation
  * write the value to eeprom
 */
-void writeEEPROMVoltage(uint8_t add_, uint16_t mV, uint8_t headerFourBits)
+boolean writeEEPROMVoltage(uint8_t add_, uint16_t mV, uint8_t headerFourBits)
 {
   uint16_t outputValue = 0;
   outputValue  = headerFourBits << 12;              // shit the bits to the left by 12 bits
@@ -446,7 +556,7 @@ void writeEEPROMVoltage(uint8_t add_, uint16_t mV, uint8_t headerFourBits)
   if (calcValue > 0x0FFF)
   {
     Serial.println(F("Over Range"));
-    return;
+    return false;
   }
 
   // if no return, one has exactly 12 bits of data
@@ -457,16 +567,17 @@ void writeEEPROMVoltage(uint8_t add_, uint16_t mV, uint8_t headerFourBits)
   float reading = (uint16_t)(outputValue & 0x0FFF);
 
   // datasheet voltage conversion
-  reading *= (1.8 * 8);
-  reading /= (4.095 * 3);
+  reading *= (1.8 * 8.0);
+  reading /= (4095 * 3.0);
   
   Serial.print("Setting Voltage To : " + String(reading) + " mV");
 
   // in case the targeted register was not set
-  if(!writeEEPROMWord(add_, outputValue))
-    Serial.print(" -- VOLTAGE " + String(add_) + " NOT SET");
+  if(!writeEEPROMWord(add_, outputValue)){
+    return false;
+  }
 
-  Serial.println();
+  return true;
 }
 
 /*
@@ -493,11 +604,18 @@ void setCellCountSleepMode(uint8_t cellCount, uint8_t idleModeTimeout, uint8_t s
   output |= idleModeTimeout;
   output |= sleepModeTimeout;
   
-  if(!writeEEPROMWord(0x48, output))      // set the idle mode and sleep mode time out
-    Serial.print(" -- SLEEP/IDLE NOT SET");
-    
-  if(!writeEEPROMWord(0x49, cellMask);    // set the battery cells number
-    Serial.print(" -- CELL COUNT NOT SET");
+  if(!writeEEPROMWord(0x48, output)){     // set the idle mode and sleep mode time out
+    Serial.println(" -- SLEEP/IDLE NOT SET");
+  }
+  else{
+    Serial.println("SLEEP/IDLE DONE");
+  }
+  if(!writeEEPROMWord(0x49, cellMask)){    // set the battery cells number
+    Serial.println(" -- CELL COUNT NOT SET");
+  }
+  else{
+    Serial.println("CELL COUNT DONE");
+  }
 }
 
 
@@ -514,7 +632,7 @@ boolean writeEEPROMTimeout(uint8_t add, uint16_t timeout, uint8_t timeScale, uin
   if(!writeEEPROMWord(add, outputValue))
     return false;
 
-  return true
+  return true;
 }
 
 /*
@@ -524,91 +642,141 @@ boolean writeEEPROMTimeout(uint8_t add, uint16_t timeout, uint8_t timeScale, uin
 void setCellBalanceOnOffTime(uint16_t onTime, uint8_t onTimeScale, uint16_t offTime, uint8_t offTimeScale)
 {
   //Sets on  and off time for balancing cycle
-  if(!writeEEPROMTimeout(0x24, onTime, onTimeScale, 0))
-    Serial.printLN(" -- TIME ON NOT SET");
-    
-  if(!writeEEPROMTimeout(0x26, offTime, offTimeScale))
+  if(!writeEEPROMTimeout(0x24, onTime, onTimeScale, 0)){
+    Serial.println(" -- TIME ON NOT SET");
+  }
+  else{
+    Serial.println("TIME ON DONE");
+  }
+  
+  if(!writeEEPROMTimeout(0x26, offTime, offTimeScale, 0)){
     Serial.println(" -- TIME OFF NOT SET");
+  }
+  else{
+    Serial.println("TIME OFF DONE");
+  }
 }
 
 
 void setCellBalanceMax(uint16_t mV)
 {
-  writeEEPROMVoltage(0x1E, mV, 0x00);
+  if(!writeEEPROMVoltage(0x1E, mV, 0x00)){
+    Serial.println(" -- CELL BALANCE MAX NOT SET");
+  }
+  else{
+    Serial.println("CELL BALANCE MAX DONE");
+  }
 }
 
 void setCellBalanceMin(uint16_t mV)
 {
-  writeEEPROMVoltage(0x1C, mV, 0x00);
+  if(!writeEEPROMVoltage(0x1C, mV, 0x00)){
+    Serial.println(" -- CELL BALANCE MIN NOT SET");
+  }
+  else{
+    Serial.println("CELL BALANCE MIN DONE");
+  }
 }
 
 void setCellBalanceDifference(uint16_t mV)
 {
-  //If the cells are closer than this the balancing stops
+  //If the cells are closer than this the balancing starts
   //defaults to 20mV
-  writeEEPROMVoltage(0x20, mV, 0x00);
+  if(!writeEEPROMVoltage(0x20, mV, 0x00)){
+      Serial.println(" -- CELL BALANCE DIFFERENCE NOT SET");
+  }
+  else{
+    Serial.println("CELL BALANCE DIFFERENCE DONE");
+  }
 }
 
 void setEOCThreshold(uint16_t mV)
 {
-  writeEEPROMVoltage(0x0C, mV, 0x00);
+  if(!writeEEPROMVoltage(0x0C, mV, 0x00)){
+    Serial.println(" -- EOC THRESHOLD NOT SET");
+  }
+  else{
+    Serial.println("EOC THRESHOLD DONE");
+  }
 }
 
 void setUVLockout(uint16_t mV)
 {
-  writeEEPROMVoltage(0x0A, mV, 0x00);
-}
-
-void setOVLockout(uint16_t mV)
-{
-  writeEEPROMVoltage(0x08, mV, 0x00);
+  if(!writeEEPROMVoltage(0x0A, mV, 0x00)){
+    Serial.println(" -- UV LOCKOUT NOT SET");
+  }
+  else{
+    Serial.println("UV LOCKOUT DONE");
+  }
 }
 
 void setUVRecovery(uint16_t mV)
 {
-  writeEEPROMVoltage(0x06, mV, 0x00);
+  if(!writeEEPROMVoltage(0x06, mV, 0x00)){
+    Serial.println(" -- UV RECOVERY NOT SET");
+  }
+  else{
+    Serial.println("UV RECOVERY DONE");
+  }
 }
 
 void setUVThres(uint16_t mV, uint8_t LoadDetectPulseWidth)
 {
-  writeEEPROMVoltage(0x04, mV, LoadDetectPulseWidth);
+  if(!writeEEPROMVoltage(0x04, mV, LoadDetectPulseWidth)){
+    Serial.println(" -- UV THRESHOLD NOT SET");
+  }
+  else{
+    Serial.println("UV THRESHOLD DONE");
+  }    
+}
+
+void setOVLockout(uint16_t mV)
+{
+  if(!writeEEPROMVoltage(0x08, mV, 0x00)){
+    Serial.println(" -- OV LOCKOUT NOT SET");
+  }
+  else{
+    Serial.println("OV LOCKOUT DONE");
+  }
 }
 
 void setOVRecovery(uint16_t mV)
 {
-  writeEEPROMVoltage(0x02, mV, 0x00);
+  if(!writeEEPROMVoltage(0x02, mV, 0x00)){
+        Serial.println(" -- OV RECOVERY NOT SET");
+  }
+  else{
+    Serial.println("OV RECOVERY DONE");
+  } 
+  
 }
 
 void setOVThres(uint16_t mV, uint8_t ChargeDetectPulseWidth)
 {
-  writeEEPROMVoltage(0x00, mV, ChargeDetectPulseWidth);
+  if(!writeEEPROMVoltage(0x00, mV, ChargeDetectPulseWidth)){
+    Serial.println(" -- OV THRESHOLD NOT SET");
+  }
+  else{
+    Serial.println("OV THRESHOLD DONE");
+ }
 }
 
 
 /*
- * Do not write to addresses 58H through 7FH or locations higher than address ABH, because these addresses
- * access registers that are reserved. Writing to these locations can result in unexpected device operation
-*/
-void writeReg(uint8_t reg, uint8_t value)
+ * Read the register containing the highest cell voltage
+ */
+uint16_t maxCellV()
 {
-  if ((reg > 0x58 && reg < 0x7F) || reg > 0xAB)
-    return false;
-  Wire.beginTransmission(0x28); // The Cell Balance Under-Temperature threshold
-  Wire.write(reg);              // first write the register to access
-  Wire.write(value);            // then write the value to pass
-  Wire.endTransmission();       // send the data
+  return readRegVScale(0x8C);
 }
 
 
 /*
- * The EEPROM Enable bit determines read/write access to either the control registers or the EEPROM.
- * Set EEEN = 0 (default) by writing 0x00 to register 0x89 to access the control registers.
- * Set EEEN = 1 by writing 0x01 to register 0x89 to access the ISL94202 EEPROM
-*/
-void disableEEPROMAccess()
+ * Read the register containing the lowest cell voltage
+ */
+uint16_t minCellV()
 {
-  //Set the bit to change to read/write EEPROM
-  writeReg(0x89, 0x00);
+  return readRegVScale(0x8A);
 }
 
 
@@ -625,7 +793,7 @@ void islSetUp(){
   setEOCThreshold(4200);//Mark End of Charge once any cell is at 4.2V
   setDischargeOverCurrent(8, 500, TIMESCALE_MS);//Set the discharge current limit to 8mv == 4A. Averaged over 0.5S - we fcked up-------------------------------
   setChargeOverCurrent(24, 500, TIMESCALE_MS);//Set the charge current limit to 24mV == 12A. Averaged over 0.5S - we fcked up-------------------------------------
-  setDischargeShortCircuit(16, 500, TIMESCALE_US);//Set the short circuit protection to 64mV == 19.2A over 0.5mS - we fcked up------------------------------------
+  setDischargeShortCircuit(32, 500, TIMESCALE_US);//Set the short circuit protection to 64mV == 16A over 0.5S - we fcked up------------------------------------
   setCellBalanceOnOffTime(10, TIMESCALE_S, 1, TIMESCALE_S);//Set balance time to 10S on, and 1S off
   setCellCountSleepMode(4, 15, 32);//Set the unit to 3S cell count. 10 minutes to enter lower power modes. 32 minutes to enter deep sleep
   setCellBalanceDifference(10);//Balance cells until they are within 10mV maximum error
@@ -678,7 +846,7 @@ void setup()
   Serial.begin(1000000);
   Serial.println("ISL94202 Test");
 
-  Wire.beginTransmission(0x01);
+  Wire.beginTransmission(0x00);   // address pin is tied to digital GND
   Wire.write(00);
   Wire.endTransmission(true); // the Arduino Wire library sends the data only if "endTransmission" is called
 
