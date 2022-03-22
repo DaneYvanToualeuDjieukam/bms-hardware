@@ -1,14 +1,33 @@
+/*
+ * For Getting Date & Time From NTP Server With ESP32 - https://lastminuteengineers.com/esp32-ntp-server-date-time-tutorial/
+ */
+
 #include "config.h"
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include "WiFi.h"
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 
 #define AWS_IOT_PUBLISH_TOPIC   "esp32/pub"
 #define AWS_IOT_SUBSCRIBE_TOPIC "esp32/sub"
  
-float t;  // battery temperature
-int bat_id = 1;
+WiFiClientSecure net = WiFiClientSecure();
+PubSubClient client(net);
+
+// Define NTP Client to get time
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP);
+
+// Variables to save date and time
+String dateStamp;
+String timeStamp;
+String hourStamp;
+
+//battery status related
+float temperature;  // battery temperature
+int bat_id = 2;
 String esp32_id;
 int counter = 0;
 float chrg_current = 0.0;
@@ -18,9 +37,6 @@ float cell_3 = 0.0;
 float cell_4 = 0.0;
 int fault = 0;
  
-WiFiClientSecure net = WiFiClientSecure();
-PubSubClient client(net);
-
 void messageHandler(char* topic, byte* payload, unsigned int length)
 {
   Serial.print("incoming: ");
@@ -82,7 +98,7 @@ void publishMessage()
   doc["esp32_id"] = String(esp32_id);
   doc["bat_id"] = String(bat_id);
   doc["chrg_current"] = String(chrg_current);
-  doc["temperature"] = String(t);
+  doc["temperature"] = String(temperature);
   doc["fault"] = String(fault);
   doc["cell_1"] = String(cell_1);
   doc["cell_2"] = String(cell_2);
@@ -95,28 +111,57 @@ void publishMessage()
   client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
   Serial.println(", sent");
 }
- 
+
+
+/*
+ * get the current time stamp
+ */
+void getTimeStamp(){
+  String formattedDate;
+  
+  //wait till the server update the time and get it (every micro sec or so)
+  while(!timeClient.update()) {
+    timeClient.forceUpdate();
+  }
+  
+  // The formattedDate comes with the following format:
+  // 2018-05-28T16:00:13Z
+  // We need to extract date and time
+  formattedDate = timeClient.getFormattedDate();
+
+  // Extract date: yyyy-MM-DD
+  int splitT = formattedDate.indexOf("T");
+  dateStamp = formattedDate.substring(0, splitT);
+  
+  // Extract time:  HH-MM-SS
+  timeStamp = formattedDate.substring(splitT+1, formattedDate.length()-1);
+}
+
+
 void setup()
 {
   Serial.begin(115200);
   connectAWS();
+  timeClient.begin();
+  timeClient.setTimeOffset(-14400);
 }
  
 void loop()
 {
-  counter = counter + 1;
-  esp32_id = String(counter) + "/" + String(millis());
-  chrg_current = float(random(46, 50))/10.0;
-  cell_1 = float(random(40, 42))/10.0;
+  getTimeStamp();
+  esp32_id = String(1) + "/" + dateStamp + "/" + timeStamp;
+  chrg_current = float(random(60, 70))/10.0;
+  cell_1 = float(random(30, 32))/10.0;
   cell_2 = float(random(40, 42))/10.0;
   cell_3 = float(random(40, 42))/10.0;
   cell_4 = float(random(40, 42))/10.0;
-  t = random(20, 23);
-  fault = 0;
-  
-  Serial.print(esp32_id + "," + String(bat_id) + "," + String(chrg_current) + "," + String(t) + "," + String(fault) + "," + String(cell_1) + "," + String(cell_2) + "," + String(cell_3) + "," + String(cell_4));
+  temperature = random(20, 23);
+  fault = 1;
+
+  Serial.print(esp32_id + "," + String(1) + "," + String(chrg_current) + "," + String(temperature) + "," + String(fault) + "," + String(cell_1) + "," + String(cell_2) + "," + String(cell_3) + "," + String(cell_4));
  
   publishMessage();
+  
   client.loop();
   delay(2000);
 }
